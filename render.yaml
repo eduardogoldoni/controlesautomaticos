@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ponte-ewelink-meg
+    env: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /
+    autoDeploy: true
