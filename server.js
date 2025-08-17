@@ -4,7 +4,7 @@ import cors from 'cors';
 import eWelink from 'ewelink-api';
 import admin from 'firebase-admin';
 
-/** ================= Firebase Admin ================= */
+/** ---------------- Firebase ---------------- */
 function initFirebase() {
   if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     admin.initializeApp({
@@ -15,8 +15,14 @@ function initFirebase() {
     const projectId = process.env.FIREBASE_PROJECT_ID;
     const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     let privateKey = process.env.FIREBASE_PRIVATE_KEY;
-    if (!projectId || !clientEmail || !privateKey) throw new Error('Env Firebase incompleto.');
+
+    if (!projectId || !clientEmail || !privateKey) {
+      throw new Error('Env Firebase incompleto.');
+    }
+
+    // aceita chave com \n
     privateKey = privateKey.replace(/\\n/g, '\n');
+
     admin.initializeApp({
       credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
       databaseURL: process.env.FIREBASE_DATABASE_URL,
@@ -26,77 +32,61 @@ function initFirebase() {
 initFirebase();
 const rtdb = admin.database();
 
+/** ---------------- Constantes ---------------- */
 const PATH_CTRL = '/meg/control';
 const PATH_TELM = '/meg/telemetry';
 
-/** ================= eWeLink ================= */
-const ew = new eWelink({
+/** ---------------- eWeLink ----------------
+ * Forçamos endpoint HTTPS 443 (evita :8080) se EWL_API_BASE estiver definido.
+ * Ex.: https://sa-apia.coolkit.cc | https://us-apia.coolkit.cc | https://eu-apia.coolkit.cc | https://as-apia.coolkit.cc
+ */
+const EW_BASE = process.env.EWL_API_BASE?.trim();
+const ewOptions = {
   email: process.env.EWL_EMAIL,
   password: process.env.EWL_PASSWORD,
   region: process.env.EWL_REGION || 'sa',
-});
+  // algumas versões da lib aceitam nomes diferentes — passamos todos
+  apiUrl: EW_BASE,
+  endpoint: EW_BASE,
+  baseUrl: EW_BASE,
+  requestTimeout: 15000,
+};
+
+const ew = new eWelink(ewOptions);
 
 async function loginEnsure() {
   try {
-    await ew.getCredentials();
+    await ew.getCredentials(); // força login/refresh
   } catch (e) {
     console.error('Falha login eWeLink:', e?.message || e);
     throw e;
   }
 }
 
-/** ================= Dispositivos (AUTO vs LIST) ================= */
-let MONITORED_IDS = new Set();
-const MODE = (process.env.SONOFF_MODE || 'AUTO').toUpperCase();
-
-function idsFromEnv() {
-  return (process.env.SONOFF_DEVICE_IDS || '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-
-function extractId(dev) {
-  // bibliotecas podem expor 'deviceid' ou 'deviceId'
-  return dev?.deviceid || dev?.deviceId || dev?.id || null;
-}
-
-async function refreshDevices() {
+// Busca todos os dispositivos automaticamente
+async function getAllDevices() {
   await loginEnsure();
-  if (MODE === 'AUTO') {
-    const list = await ew.getDevices();
-    const arr = Array.isArray(list) ? list : (list?.devicelist || list?.devices || []);
-    const next = new Set();
-    for (const d of arr) {
-      const id = extractId(d);
-      if (id) next.add(id);
-    }
-    if (next.size === 0) {
-      console.warn('[AUTO] Nenhum device encontrado na conta eWeLink.');
-    }
-    MONITORED_IDS = next;
-    console.log('[AUTO] Dispositivos monitorados:', Array.from(MONITORED_IDS));
-  } else {
-    MONITORED_IDS = new Set(idsFromEnv());
-    console.log('[LIST] Dispositivos monitorados:', Array.from(MONITORED_IDS));
-  }
+  const list = await ew.getDevices();
+  return list || [];
 }
 
-/** ================= Operações ================= */
 async function readStatus(deviceId) {
   await loginEnsure();
   const dev = await ew.getDevice(deviceId);
   const params = dev?.params || {};
   const state = params.switch || params.switches?.[0]?.switch || 'unknown';
-  const temperature = params.currentTemperature ?? params.temperature ?? params.tmp ?? null;
-  const humidity = params.currentHumidity ?? params.humidity ?? params.hum ?? null;
+  const temperature =
+    params.currentTemperature ?? params.temperature ?? params.tmp ?? null;
+  const humidity =
+    params.currentHumidity ?? params.humidity ?? params.hum ?? null;
   const online = dev?.online ?? true;
   return { deviceId, state, temperature, humidity, online, raw: dev };
 }
 
 async function setPower(deviceId, desired) {
   await loginEnsure();
-  return await ew.setDevicePowerState(deviceId, desired); // 'on' | 'off'
+  const res = await ew.setDevicePowerState(deviceId, desired);
+  return res;
 }
 
 async function pushTelemetry(deviceId) {
@@ -116,76 +106,72 @@ async function pushTelemetry(deviceId) {
   }
 }
 
-/** ================= Observador de comandos dinâmico =================
- * Em vez de criar um listener por device, observamos /meg/control e
- * reagimos a mudanças/adições de filhos. A chave do filho é o deviceId.
- */
-const ctrlRoot = rtdb.ref(PATH_CTRL);
-async function handleCtrlSnapshot(snap) {
-  const deviceId = snap.key;
-  const data = snap.val();
-  const cmd = (data?.command || '').toLowerCase();
-  if (!deviceId || (cmd !== 'on' && cmd !== 'off')) return;
-  try {
-    // Em AUTO, se for um device novo, adiciona ao set para polling
-    if (!MONITORED_IDS.has(deviceId) && MODE === 'AUTO') {
-      MONITORED_IDS.add(deviceId);
-      console.log('[AUTO] Novo device via comando:', deviceId);
+async function watchCommands(deviceId) {
+  const ref = rtdb.ref(`${PATH_CTRL}/${deviceId}`);
+  ref.on('value', async snap => {
+    const data = snap.val();
+    if (!data) return;
+    const cmd = (data.command || '').toLowerCase();
+    if (cmd !== 'on' && cmd !== 'off') return;
+    try {
+      await setPower(deviceId, cmd);
+      await pushTelemetry(deviceId);
+      await ref.set({});
+    } catch (e) {
+      console.error('Erro executando comando', deviceId, cmd, e?.message || e);
     }
-    await setPower(deviceId, cmd);
-    await pushTelemetry(deviceId);
-    await rtdb.ref(`${PATH_CTRL}/${deviceId}`).set({}); // limpa comando
+  });
+}
+
+// Inicia watchers para todos os devices automaticamente
+async function initWatchers() {
+  try {
+    const devices = await getAllDevices();
+    devices.forEach(dev => watchCommands(dev.deviceid));
+    console.log('[AUTO] Dispositivos monitorados:', devices.map(d => d.deviceid));
   } catch (e) {
-    console.error('Erro executando comando', deviceId, cmd, e?.message || e);
+    console.error('[AUTO] Erro ao iniciar watchers:', e?.message || e);
   }
 }
-ctrlRoot.on('child_added', handleCtrlSnapshot);
-ctrlRoot.on('child_changed', handleCtrlSnapshot);
+initWatchers();
 
-/** ================= Tarefas periódicas ================= */
+// Polling automático de todos os devices
 const POLL_MS = Number(process.env.POLL_MS || 8000);
-const REFRESH_DEVICES_MS = Number(process.env.REFRESH_DEVICES_MS || 60000);
-
-// 1) Atualiza lista de devices (especialmente em AUTO)
-await refreshDevices();
-setInterval(refreshDevices, REFRESH_DEVICES_MS);
-
-// 2) Poll de telemetria para todos os monitorados
-setInterval(() => {
-  MONITORED_IDS.forEach(id => pushTelemetry(id));
+setInterval(async () => {
+  try {
+    const devices = await getAllDevices();
+    devices.forEach(dev => pushTelemetry(dev.deviceid));
+    if (!devices?.length) console.log('[AUTO] Nenhum device encontrado na conta eWeLink.');
+  } catch (e) {
+    console.error('[AUTO] Poll error:', e?.message || e);
+  }
 }, POLL_MS);
 
-/** ================= API HTTP ================= */
+/** ---------------- HTTP ---------------- */
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 app.get('/', async (_, res) => {
-  res.json({
-    ok: true,
-    mode: MODE,
-    devices: Array.from(MONITORED_IDS),
-    ctrlPath: PATH_CTRL,
-    telmPath: PATH_TELM,
-    pollMs: POLL_MS,
-    refreshDevicesMs: REFRESH_DEVICES_MS,
-  });
-});
-
-app.get('/api/devices', async (req, res) => {
   try {
-    await loginEnsure();
-    const list = await ew.getDevices();
-    res.json(list);
+    const devices = await getAllDevices();
+    res.json({
+      ok: true,
+      devices: devices.map(d => d.deviceid),
+      ctrlPath: PATH_CTRL,
+      telmPath: PATH_TELM,
+      region: ewOptions.region,
+      apiBase: EW_BASE || 'default',
+    });
   } catch (e) {
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
 
-app.post('/api/reload', async (req, res) => {
+app.get('/api/devices', async (req, res) => {
   try {
-    await refreshDevices();
-    res.json({ ok: true, devices: Array.from(MONITORED_IDS) });
+    const list = await getAllDevices();
+    res.json(list);
   } catch (e) {
     res.status(500).json({ error: e?.message || String(e) });
   }
@@ -211,5 +197,10 @@ app.post('/api/device/:id/:action(on|off)', async (req, res) => {
   }
 });
 
+/** ---------------- Start ---------------- */
 const PORT = Number(process.env.PORT || 3001);
-app.listen(PORT, () => console.log(`Ponte eWeLink (modo ${MODE}) rodando em http://localhost:${PORT}`));
+app.listen(PORT, () =>
+  console.log(
+    `Ponte eWeLink (modo AUTO) rodando em http://localhost:${PORT}`,
+  ),
+);
