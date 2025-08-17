@@ -1,7 +1,7 @@
 {
   "name": "ponte-ewelink-meg",
   "version": "1.1.0",
-  "description": "Ponte Express + ewelink-api + Firebase Admin para integrar Sonoff ao sistema MEG (modo automático)",
+  "description": "Ponte Express + ewelink-api + Firebase Admin para integrar Sonoff ao sistema MEG",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -9,10 +9,10 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "ewelink-api": "^3.1.0",
+    "ewelink-api": "^4.1.0",
     "express": "^4.19.2",
-    "firebase-admin": "^12.5.0",
-    "cors": "^2.8.5"
+    "firebase-admin": "^12.5.0"
   }
 }
