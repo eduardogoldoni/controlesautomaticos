@@ -1,41 +1,39 @@
-# Ponte eWeLink ↔ MEG (Automático)
+# Ponte eWeLink → Firebase (MEG)
 
-## O que mudou
-- **SONOFF_MODE=AUTO**: monitora **todos os dispositivos** da sua conta eWeLink automaticamente.
-- Quando você adiciona um novo Sonoff no app, ele **entra sozinho** na telemetria e no controle (sem editar `.env`).
+Esta aplicação cria uma ponte entre dispositivos **eWeLink (Sonoff, etc.)** e o **Firebase**, 
+permitindo integração com o sistema de automação da MEG.
 
-## Como funciona
-- Telemetria em: `/meg/telemetry/<deviceId>`
-- Comandos em: `/meg/control/<deviceId> = { command: 'on' | 'off' }`
-- A ponte também oferece API local:
-  - `GET /` → info (lista monitorados)
-  - `GET /api/devices` → dispositivos via eWeLink
-  - `POST /api/reload` → força recarregar lista (útil se quiser agora)
-  - `GET /api/device/:id/status`
-  - `POST /api/device/:id/on` e `/off`
+## 🚀 Como usar
 
-## Instalação
-```bash
-npm i
-cp .env.example .env
-# Preencha o .env (eWeLink + Firebase)
-npm start
-```
+1. Clone este repositório e instale as dependências:
+   ```bash
+   npm install
+   ```
 
-## Variáveis de ambiente
-- `SONOFF_MODE=AUTO` → monitora todos os dispositivos; `LIST` → usa `SONOFF_DEVICE_IDS`
-- `REFRESH_DEVICES_MS=60000` → frequência (ms) para recarregar a lista em modo AUTO
-- `POLL_MS=8000` → polling da telemetria
+2. Configure as variáveis de ambiente (Render ou .env.local) seguindo o modelo:
+   - `EWL_EMAIL` → email da conta eWeLink
+   - `EWL_PASSWORD` → senha da conta eWeLink
+   - `EWL_REGION` → região (`sa`, `us`, `eu`, `as`)
+   - `EWL_API_BASE` → base da API (`https://sa-apia.coolkit.cc` etc.)
 
-## Exemplo (front)
-```js
-// ligar um TH16 específico
-firebase.database().ref('/meg/control/10024a6949').set({ command: 'on' });
+3. Configure as chaves do Firebase Admin (`FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_DATABASE_URL`).
 
-// observar telemetria de todos (escuta em /meg/telemetry)
-firebase.database().ref('/meg/telemetry').on('child_changed', snap => {
-  const id = snap.key;
-  const t = snap.val();
-  console.log('atualizou', id, t);
-});
-```
+4. Rode localmente:
+   ```bash
+   npm start
+   ```
+
+5. Deploy no Render:
+   - Crie novo Web Service com este repo
+   - Defina as variáveis de ambiente (não suba seu `.env` real)
+   - O Render define automaticamente a porta via `PORT`.
+
+## 🔗 Endpoints
+
+- `GET /` → Testa se a ponte está rodando
+- `GET /api/devices` → Lista os dispositivos vinculados à conta eWeLink
+- `POST /api/device/:id/toggle` → Liga/desliga dispositivo (`{ "state": "on" | "off" }`)
+
+---
+
+Mantido por **MEG Manutenções**
